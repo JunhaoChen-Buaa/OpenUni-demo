@@ -4,7 +4,7 @@ import { buildAskFallbackResponse } from "@/lib/ask-fallback";
 import { buildRuleAwareFactResponse } from "@/lib/college-rule-ask";
 import type { StoredCollegeRule } from "@/lib/college-rule-types";
 import { getStoredCollegeRule } from "@/lib/college-rule-store";
-import { requestDeepSeekDecision } from "@/lib/deepseek";
+import { requestMiniMaxDecision } from "@/lib/deepseek";
 import {
   classifyAskQuestion,
   defaultProfile,
@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const result = await requestDeepSeekDecision({
+    const result = await requestMiniMaxDecision({
       profile,
       signal,
       question,

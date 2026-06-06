@@ -14,20 +14,7 @@ import type {
 } from "@/data/buaa-discovery-kb";
 import type { SignalAskContext, UserProfile } from "@/lib/mock-data";
 import type { StoredCollegeRule } from "@/lib/college-rule-types";
-
-type DeepSeekMessage = {
-  role: "system" | "user";
-  content: string;
-};
-
-type DeepSeekResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string;
-      reasoning_content?: string;
-    };
-  }>;
-};
+import { requestMiniMaxChat, type MiniMaxMessage } from "@/lib/minimax-client";
 
 type ModelAnswer = Omit<AskApiResponse, "source" | "notice">;
 
@@ -60,62 +47,6 @@ export type SourceResolutionModelResult = {
   confidence: number;
   reasoning: string;
 };
-
-const REQUEST_TIMEOUT_MS = 12000;
-
-function getDeepSeekConfig() {
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
-  const baseUrl = process.env.DEEPSEEK_BASE_URL?.trim();
-  const model = process.env.DEEPSEEK_MODEL?.trim();
-
-  if (!apiKey || !baseUrl || !model) {
-    throw new Error("Missing DeepSeek environment configuration.");
-  }
-
-  return {
-    apiKey,
-    baseUrl: baseUrl.replace(/\/$/, ""),
-    model,
-  };
-}
-
-type DeepSeekReasoningMode = "decision" | "discovery_extraction" | "source_resolution";
-
-function supportsDeepSeekThinking(model: string) {
-  return /^deepseek-v4/i.test(model);
-}
-
-function buildDeepSeekRequestBody({
-  model,
-  messages,
-  maxTokens,
-  temperature,
-  reasoningMode,
-}: {
-  model: string;
-  messages: DeepSeekMessage[];
-  maxTokens: number;
-  temperature?: number;
-  reasoningMode: DeepSeekReasoningMode;
-}) {
-  const useThinking =
-    supportsDeepSeekThinking(model) &&
-    (reasoningMode === "decision" || reasoningMode === "source_resolution");
-
-  return {
-    model,
-    messages,
-    max_tokens: maxTokens,
-    ...(useThinking
-      ? {
-          thinking: { type: "enabled" as const },
-          reasoning_effort: reasoningMode === "decision" ? "high" : "medium",
-        }
-      : typeof temperature === "number"
-        ? { temperature }
-        : {}),
-  };
-}
 
 function getDefaultFollowUps(questionType: AskQuestionType): AskFollowUps {
   if (questionType === "fact") {
@@ -214,7 +145,7 @@ function buildMessages({
   question: string;
   questionType: AskQuestionType;
   activeRule?: StoredCollegeRule | null;
-}): DeepSeekMessage[] {
+}): MiniMaxMessage[] {
   const systemPrompt = [
     "你是 OpenUni，一名 AI 校园关键信号助手。",
     "你的任务不是泛聊天，而是帮助大学生围绕当前信号做判断、核事实、做轻量比较。",
@@ -394,10 +325,17 @@ function parseModelAnswer(
   const jsonCandidate = content.trim().match(/\{[\s\S]*\}/)?.[0];
 
   if (!jsonCandidate) {
-    throw new Error("DeepSeek response did not contain JSON.");
+    return buildModelTextAnswer(content, signal, questionType);
   }
 
-  const parsed = JSON.parse(jsonCandidate) as Partial<ModelAnswer>;
+  let parsed: Partial<ModelAnswer>;
+
+  try {
+    parsed = JSON.parse(jsonCandidate) as Partial<ModelAnswer>;
+  } catch {
+    return buildModelTextAnswer(content, signal, questionType);
+  }
+
   const defaultBlocks = getDefaultBlocks(questionType);
 
   return {
@@ -425,7 +363,65 @@ function parseModelAnswer(
   };
 }
 
-export async function requestDeepSeekDecision({
+function buildModelTextAnswer(
+  content: string,
+  signal: SignalAskContext,
+  questionType: AskQuestionType,
+): ModelAnswer {
+  const defaultBlocks = getDefaultBlocks(questionType);
+  const cleaned = normalizeText(
+    content
+      .replace(/^```(?:json)?/i, "")
+      .replace(/```$/i, "")
+      .trim(),
+    defaultBlocks[0].content,
+  );
+  const inferredHeadline = extractQuotedJsonField(cleaned, "headline");
+  const inferredSummary = extractQuotedJsonField(cleaned, "summary_line");
+  const summary =
+    inferredSummary ??
+    (cleaned.trim().startsWith("{")
+      ? defaultBlocks[0].content
+      : cleaned.split(/\n{2,}/)[0].slice(0, 260));
+
+  return {
+    question_type: questionType,
+    headline:
+      inferredHeadline ??
+      (questionType === "fact"
+        ? "MiniMax 已返回事实判断"
+        : questionType === "explore_compare"
+          ? "MiniMax 已返回比较建议"
+          : "MiniMax 已返回决策判断"),
+    summary_line: summary,
+    blocks: defaultBlocks.map((block, index) =>
+      index === 0
+        ? {
+            ...block,
+            content: summary,
+          }
+        : block,
+    ),
+    evidence: signal.factContext.evidence.slice(0, 3),
+    follow_ups: getDefaultFollowUps(questionType),
+    related_opportunities: normalizeRelatedOpportunities([], signal),
+  };
+}
+
+function extractQuotedJsonField(content: string, field: string) {
+  const match = content.match(new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return match[1].replace(/\\"/g, "\"").trim() || null;
+  }
+}
+
+export async function requestMiniMaxDecision({
   profile,
   signal,
   question,
@@ -438,45 +434,15 @@ export async function requestDeepSeekDecision({
   questionType: AskQuestionType;
   activeRule?: StoredCollegeRule | null;
 }): Promise<ModelAnswer> {
-  const { apiKey, baseUrl, model } = getDeepSeekConfig();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const content = await requestMiniMaxChat({
+    messages: buildMessages({ profile, signal, question, questionType, activeRule }),
+    maxTokens: 2200,
+    temperature: 0.2,
+    reasoningMode: "decision",
+    jsonMode: true,
+  });
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(
-        buildDeepSeekRequestBody({
-          model,
-          messages: buildMessages({ profile, signal, question, questionType, activeRule }),
-          maxTokens: 900,
-          temperature: 0.2,
-          reasoningMode: "decision",
-        }),
-      ),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`DeepSeek request failed with status ${response.status}.`);
-    }
-
-    const data = (await response.json()) as DeepSeekResponse;
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error("DeepSeek response content was empty.");
-    }
-
-    return parseModelAnswer(content, signal, questionType);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return parseModelAnswer(content, signal, questionType);
 }
 
 function normalizeDiscoveryCandidateType(value: unknown): DiscoveryCandidateType {
@@ -529,7 +495,7 @@ function parseSourceResolution(content: string): SourceResolutionModelResult {
   const jsonCandidate = content.trim().match(/\{[\s\S]*\}/)?.[0];
 
   if (!jsonCandidate) {
-    throw new Error("DeepSeek source resolution response did not contain JSON.");
+    throw new Error("MiniMax source resolution response did not contain JSON.");
   }
 
   const parsed = JSON.parse(jsonCandidate) as Partial<SourceResolutionModelResult>;
@@ -555,7 +521,7 @@ function parseDiscoveryExtraction(content: string): DiscoveryExtractionResult {
   const jsonCandidate = content.trim().match(/\{[\s\S]*\}/)?.[0];
 
   if (!jsonCandidate) {
-    throw new Error("DeepSeek discovery response did not contain JSON.");
+    throw new Error("MiniMax discovery response did not contain JSON.");
   }
 
   const parsed = JSON.parse(jsonCandidate) as Partial<DiscoveryExtractionResult>;
@@ -606,7 +572,7 @@ function parseDiscoveryExtraction(content: string): DiscoveryExtractionResult {
   };
 }
 
-export async function requestDeepSeekDiscoveryExtraction({
+export async function requestMiniMaxDiscoveryExtraction({
   source,
   pageTitle,
   pageText,
@@ -615,10 +581,6 @@ export async function requestDeepSeekDiscoveryExtraction({
   pageTitle: string | null;
   pageText: string;
 }): Promise<DiscoveryExtractionResult> {
-  const { apiKey, baseUrl, model } = getDeepSeekConfig();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   const systemPrompt = [
     "你是 OpenUni 的北航发现层提取助手。",
     "你的任务不是做泛化摘要，而是从单个北航来源页面里提取可进入“北航最近发生了什么”发现层的结构化候选。",
@@ -669,47 +631,21 @@ export async function requestDeepSeekDiscoveryExtraction({
     "5. ignored 代表可保留为校园动态，但不重点推进。",
   ].join("\n");
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(
-        buildDeepSeekRequestBody({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          maxTokens: 1000,
-          temperature: 0.1,
-          reasoningMode: "discovery_extraction",
-        }),
-      ),
-      cache: "no-store",
-      signal: controller.signal,
-    });
+  const content = await requestMiniMaxChat({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    maxTokens: 1800,
+    temperature: 0.1,
+    reasoningMode: "discovery_extraction",
+    jsonMode: true,
+  });
 
-    if (!response.ok) {
-      throw new Error(`DeepSeek discovery request failed with status ${response.status}.`);
-    }
-
-    const data = (await response.json()) as DeepSeekResponse;
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error("DeepSeek discovery response content was empty.");
-    }
-
-    return parseDiscoveryExtraction(content);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return parseDiscoveryExtraction(content);
 }
 
-export async function requestDeepSeekSourceResolution({
+export async function requestMiniMaxSourceResolution({
   input,
   knownSources,
 }: {
@@ -721,10 +657,6 @@ export async function requestDeepSeekSourceResolution({
     source_home_url: string;
   }>;
 }): Promise<SourceResolutionModelResult> {
-  const { apiKey, baseUrl, model } = getDeepSeekConfig();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   const systemPrompt = [
     "你是 OpenUni 的来源解析助手。",
     "任务是把用户一句自然语言里的“想关注的来源”解析成结构化来源信息。",
@@ -756,44 +688,18 @@ export async function requestDeepSeekSourceResolution({
     "}",
   ].join("\n");
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(
-        buildDeepSeekRequestBody({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          maxTokens: 500,
-          temperature: 0.1,
-          reasoningMode: "source_resolution",
-        }),
-      ),
-      cache: "no-store",
-      signal: controller.signal,
-    });
+  const content = await requestMiniMaxChat({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    maxTokens: 1000,
+    temperature: 0.1,
+    reasoningMode: "source_resolution",
+    jsonMode: true,
+  });
 
-    if (!response.ok) {
-      throw new Error(`DeepSeek source resolution request failed with status ${response.status}.`);
-    }
-
-    const data = (await response.json()) as DeepSeekResponse;
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error("DeepSeek source resolution response content was empty.");
-    }
-
-    return parseSourceResolution(content);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return parseSourceResolution(content);
 }
 
 

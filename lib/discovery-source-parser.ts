@@ -1,7 +1,7 @@
 import "server-only";
 
 import { buaaSourceWatchlist, type SourceKind, type SourceWatchRecord } from "@/data/buaa-discovery-kb";
-import { requestDeepSeekSourceResolution } from "@/lib/deepseek";
+import { requestMiniMaxSourceResolution } from "@/lib/deepseek";
 
 type FollowPreset = {
   keywords: string[];
@@ -382,7 +382,7 @@ export async function resolveFollowSourceIntent(input: string, runtimeSources: S
   }
 
   try {
-    const modelResolution = await requestDeepSeekSourceResolution({
+    const modelResolution = await requestMiniMaxSourceResolution({
       input: parsed.raw_input,
       knownSources: knownSources.map((source) => ({
         source_name: source.source_name,

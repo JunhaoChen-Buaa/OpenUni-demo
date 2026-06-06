@@ -8,8 +8,12 @@ import type {
   RuleEvidenceFieldKey,
   RuleFieldEvidence,
 } from "@/lib/college-rule-types";
+import {
+  getMiniMaxConfig,
+  requestMiniMaxChat,
+  type MiniMaxMessage,
+} from "@/lib/minimax-client";
 
-const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_MODEL_CONTEXT_LENGTH = 9_000;
 const MAX_EVIDENCE_EXCERPTS = 6;
 
@@ -21,20 +25,6 @@ type RuleExtractionResult = {
   facts: CollegeRuleFacts;
   source: RuleExtractionSource;
   textLength: number;
-};
-
-type DeepSeekMessage = {
-  role: "system" | "user";
-  content: string;
-};
-
-type DeepSeekResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string;
-      reasoning_content?: string;
-    };
-  }>;
 };
 
 type PdfJsTextItem = {
@@ -106,44 +96,6 @@ type RuleFieldCandidate<T> = {
   excerpt: string;
   confidence: number;
 };
-
-function getDeepSeekConfig() {
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
-  const baseUrl = process.env.DEEPSEEK_BASE_URL?.trim();
-  const model = process.env.DEEPSEEK_MODEL?.trim();
-
-  if (!apiKey || !baseUrl || !model) {
-    return null;
-  }
-
-  return {
-    apiKey,
-    baseUrl: baseUrl.replace(/\/$/, ""),
-    model,
-  };
-}
-
-function supportsDeepSeekThinking(model: string) {
-  return /^deepseek-v4/i.test(model);
-}
-
-function buildRuleExtractionRequestBody(config: NonNullable<ReturnType<typeof getDeepSeekConfig>>, messages: DeepSeekMessage[]) {
-  const useThinking = supportsDeepSeekThinking(config.model);
-
-  return {
-    model: config.model,
-    messages,
-    max_tokens: 1000,
-    ...(useThinking
-      ? {
-          thinking: { type: "enabled" as const },
-          reasoning_effort: "high",
-        }
-      : {
-          temperature: 0.1,
-        }),
-  };
-}
 
 function normalizeText(text: string) {
   return text
@@ -739,7 +691,7 @@ function mergeFacts(baseFacts: CollegeRuleFacts, modelFacts: Partial<CollegeRule
   };
 }
 
-function buildExtractionMessages(context: RuleExtractionContext): DeepSeekMessage[] {
+function buildExtractionMessages(context: RuleExtractionContext): MiniMaxMessage[] {
   const systemPrompt = [
     "你是 OpenUni 的学院规则抽取器。",
     "你会在已有的本地结构化抽取结果基础上，补充或校正文档中明确出现的规则事实。",
@@ -790,32 +742,20 @@ function buildExtractionMessages(context: RuleExtractionContext): DeepSeekMessag
 }
 
 async function requestModelRuleFacts(context: RuleExtractionContext) {
-  const config = getDeepSeekConfig();
+  const config = getMiniMaxConfig({ optional: true });
   if (!config) {
     return null;
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   try {
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(buildRuleExtractionRequestBody(config, buildExtractionMessages(context))),
-      cache: "no-store",
-      signal: controller.signal,
+    const content = await requestMiniMaxChat({
+      messages: buildExtractionMessages(context),
+      maxTokens: 1800,
+      temperature: 0.1,
+      reasoningMode: "rule_extraction",
+      jsonMode: true,
     });
 
-    if (!response.ok) {
-      throw new Error(`Rule extraction request failed with status ${response.status}`);
-    }
-
-    const data = (await response.json()) as DeepSeekResponse;
-    const content = data.choices?.[0]?.message?.content?.trim();
     const jsonCandidate = content?.match(/\{[\s\S]*\}/)?.[0];
 
     if (!jsonCandidate) {
@@ -823,8 +763,9 @@ async function requestModelRuleFacts(context: RuleExtractionContext) {
     }
 
     return normalizeModelFacts(JSON.parse(jsonCandidate) as Partial<CollegeRuleFacts>);
-  } finally {
-    clearTimeout(timeoutId);
+  } catch (error) {
+    console.error("Rule model extraction failed:", error);
+    return null;
   }
 }
 

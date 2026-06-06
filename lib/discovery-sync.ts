@@ -7,7 +7,7 @@ import type {
 } from "@/data/buaa-discovery-kb";
 import { applySourceSyncOutcome, buildSourceSyncMetrics } from "@/lib/buaa-discovery";
 import {
-  requestDeepSeekDiscoveryExtraction,
+  requestMiniMaxDiscoveryExtraction,
   type DiscoveryExtractionCandidate,
 } from "@/lib/deepseek";
 
@@ -607,7 +607,7 @@ async function syncSources(sources: SourceWatchRecord[]): Promise<DiscoverySyncR
 
       for (const [index, current] of snapshots.entries()) {
         try {
-          const extraction = await requestDeepSeekDiscoveryExtraction({
+          const extraction = await requestMiniMaxDiscoveryExtraction({
             source,
             pageTitle: current.snapshot.title,
             pageText: current.snapshot.text,

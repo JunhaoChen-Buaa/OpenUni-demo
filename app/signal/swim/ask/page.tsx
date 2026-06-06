@@ -174,7 +174,7 @@ export default function AskPage() {
 
     try {
       const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+      const timeoutId = window.setTimeout(() => controller.abort(), 95_000);
 
       const response = await fetch("/api/ask", {
         method: "POST",
