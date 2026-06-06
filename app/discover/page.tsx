@@ -1870,6 +1870,17 @@ export default function DiscoverPage() {
         </div>
       </section>
 
+      <section className="rounded-[22px] border border-amber-200/80 bg-amber-50/70 px-4 py-3 shadow-soft">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">
+            Vercel 演示版
+          </span>
+          <p className="text-sm leading-6 text-amber-900">
+            当前线上版本用于演示 OpenUni 的核心体验；还没有部署完整后端服务器、后台队列和持久数据库，所以发现同步采用轻量读取策略。
+          </p>
+        </div>
+      </section>
+
       <section className="rounded-[24px] border border-slate-200/80 bg-white/84 p-4 shadow-soft">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="grid flex-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -28,6 +28,7 @@ type MiniMaxChatOptions = {
   temperature?: number;
   reasoningMode: MiniMaxReasoningMode;
   jsonMode?: boolean;
+  timeoutMs?: number;
 };
 
 export type MiniMaxConfig = {
@@ -114,10 +115,11 @@ export async function requestMiniMaxChat({
   temperature,
   reasoningMode,
   jsonMode = false,
+  timeoutMs,
 }: MiniMaxChatOptions) {
   const config = getMiniMaxConfig();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs ?? REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(buildMiniMaxEndpoint(config, "/chat/completions"), {

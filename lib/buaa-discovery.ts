@@ -89,7 +89,18 @@ export type SourceSyncMetrics = {
   ignored_hit_count: number;
 };
 
-export function getBuiltInSourcesForSync(limit = 8) {
+function signalSourceBoost(source: SourceWatchRecord) {
+  switch (source.registry_category) {
+    case "团学与活动":
+      return 4;
+    case "就业":
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+export function getBuiltInSourcesForSync(limit = 8, options?: { preferSignalSources?: boolean }) {
   return [...buaaSourceWatchlist]
     .filter(
       (source) =>
@@ -98,7 +109,11 @@ export function getBuiltInSourcesForSync(limit = 8) {
         source.direct_html_readable &&
         Boolean(source.seed_url || source.source_home_url),
     )
-    .sort((a, b) => b.priority_score - a.priority_score)
+    .sort((a, b) => {
+      const scoreA = a.priority_score + (options?.preferSignalSources ? signalSourceBoost(a) : 0);
+      const scoreB = b.priority_score + (options?.preferSignalSources ? signalSourceBoost(b) : 0);
+      return scoreB - scoreA;
+    })
     .slice(0, limit);
 }
 

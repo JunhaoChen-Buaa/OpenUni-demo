@@ -11,10 +11,12 @@ import {
   type DiscoveryExtractionCandidate,
 } from "@/lib/deepseek";
 
-const FETCH_TIMEOUT_MS = 9000;
 const IS_VERCEL = process.env.VERCEL === "1";
+const FETCH_TIMEOUT_MS = IS_VERCEL ? 6000 : 9000;
 const MAX_READ_TARGETS_PER_SOURCE = IS_VERCEL ? 1 : 3;
-const USE_MODEL_DISCOVERY_SYNC = !IS_VERCEL || process.env.OPENUNI_DISCOVERY_MODEL_SYNC === "true";
+const USE_MODEL_DISCOVERY_SYNC =
+  !IS_VERCEL || process.env.OPENUNI_DISCOVERY_MODEL_SYNC === "true";
+const DISCOVERY_MODEL_TIMEOUT_MS = IS_VERCEL ? 35_000 : undefined;
 
 export type DiscoverySyncResult = {
   synced_at: string;
@@ -50,7 +52,13 @@ type PageSnapshot = {
   text: string;
   html: string;
   publishedAt: string | null;
-  linkedUrls: string[];
+  links: PageLink[];
+};
+
+type PageLink = {
+  url: string;
+  text: string;
+  publishedAt: string | null;
 };
 
 function normalizeCandidateText(value: string | null | undefined) {
@@ -167,16 +175,16 @@ function isArticleLikeUrl(url: string) {
     const parsed = new URL(url);
     const pathname = parsed.pathname.toLowerCase();
 
-    if (/mp\.weixin\.qq\.com|article|detail|content|notice|news|info|show/i.test(url)) {
+    if (pathname === "/" || /\/index(\.\w+)?$/.test(pathname)) {
+      return false;
+    }
+
+    if (/\/(zhxw|ztxw|bhrw|xyfc_new|kjzx_new|mtbh_new|gybh_new|spxw1|wyyd_new|tzgg|xwdt|xwtz|syxw|zsjz|bslc\d*)\.htm(l)?$/.test(pathname)) {
+      return false;
+    }
+
+    if (/mp\.weixin\.qq\.com/i.test(parsed.hostname) || /\/(article|detail|content|notice|info|show)\//i.test(pathname)) {
       return true;
-    }
-
-    if (/\/index(\.\w+)?$|\/?$/.test(pathname)) {
-      return false;
-    }
-
-    if (/\/(tzgg|xwdt|xwtz|syxw|zsjz|bslc\d*)\.htm$/.test(pathname)) {
-      return false;
     }
 
     if (/\/\d+\/\d+\.htm(l)?$/.test(pathname)) {
@@ -193,20 +201,79 @@ function isArticleLikeUrl(url: string) {
 
     return /\.htm(l)?$/.test(pathname) && pathname.split("/").length >= 3;
   } catch {
-    return /mp\.weixin\.qq\.com|article|detail|content|notice|news|info|show/i.test(url);
+    return /mp\.weixin\.qq\.com|article|detail|content|notice|info|show/i.test(url);
   }
 }
 
-function extractLinkedUrls(html: string, baseUrl: string) {
-  const matches = Array.from(html.matchAll(/href=["']([^"'#]+)["']/gi));
-  const urls = matches
-    .map((match) => match[1]?.trim())
-    .filter(Boolean)
-    .filter((href) => !/^(javascript:|mailto:|tel:)/i.test(href as string))
-    .map((href) => normalizeHref(baseUrl, href as string))
-    .filter((href): href is string => Boolean(href));
+function extractAnchorText(fragment: string) {
+  return extractVisibleText(fragment).replace(/\s+/g, " ").trim();
+}
 
-  return Array.from(new Set(urls));
+function extractLinkPublishedAt(text: string) {
+  const raw =
+    text.match(/20\d{2}[-/.年]\s?\d{1,2}[-/.月]\s?\d{1,2}/)?.[0] ??
+    text.match(/\d{1,2}[-/.月]\s?\d{1,2}[\s日]*(20\d{2})/)?.[0] ??
+    text.match(/\d{1,2}\s+20\d{2}[.]\d{1,2}/)?.[0] ??
+    null;
+
+  if (!raw) {
+    return null;
+  }
+
+  const yearFirst = raw.match(/20\d{2}/)?.[0];
+  let normalized = raw
+    .replace(/年|[/.]/g, "-")
+    .replace(/月/g, "-")
+    .replace(/日/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (yearFirst && !normalized.startsWith(yearFirst)) {
+    const numbers = normalized.match(/\d+/g) ?? [];
+    if (numbers.length >= 3) {
+      const year = numbers.find((item) => item.length === 4) ?? yearFirst;
+      const others = numbers.filter((item) => item !== year);
+      normalized = `${year}-${others[0]}-${others[1]}`;
+    }
+  }
+
+  const value = new Date(normalized);
+  return Number.isNaN(value.getTime()) ? null : value.toISOString();
+}
+
+function extractLinks(html: string, baseUrl: string): PageLink[] {
+  const matches = Array.from(html.matchAll(/<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi));
+  const links = matches
+    .map((match) => {
+      const href = match[1]?.trim();
+      if (!href || /^(javascript:|mailto:|tel:)/i.test(href)) {
+        return null;
+      }
+
+      const url = normalizeHref(baseUrl, href);
+      if (!url) {
+        return null;
+      }
+
+      const text = extractAnchorText(match[2] ?? "");
+
+      return {
+        url,
+        text,
+        publishedAt: extractLinkPublishedAt(text),
+      };
+    })
+    .filter((item): item is PageLink => Boolean(item));
+
+  const deduped = new Map<string, PageLink>();
+  for (const link of links) {
+    const existing = deduped.get(link.url);
+    if (!existing || link.text.length > existing.text.length) {
+      deduped.set(link.url, link);
+    }
+  }
+
+  return Array.from(deduped.values());
 }
 
 function extractVisibleText(html: string) {
@@ -246,6 +313,7 @@ async function fetchPageSnapshot(url: string): Promise<PageSnapshot> {
     const html = await response.text();
     const title = extractPageTitle(html);
     const text = extractVisibleText(html);
+    const links = extractLinks(html, url);
 
     if (!text) {
       throw new Error("No visible text extracted from source page.");
@@ -256,7 +324,7 @@ async function fetchPageSnapshot(url: string): Promise<PageSnapshot> {
       text,
       html,
       publishedAt: extractPublishedAt(html, text),
-      linkedUrls: extractLinkedUrls(html, url),
+      links,
     };
   } finally {
     clearTimeout(timeoutId);
@@ -305,9 +373,44 @@ function rankRecentCandidates(candidates: DiscoveryCandidate[]) {
     .slice(0, 6);
 }
 
+function scoreSourceLink(link: PageLink, source: SourceWatchRecord) {
+  const merged = `${link.text} ${link.url} ${source.source_name} ${source.registry_category ?? ""}`;
+  const text = link.text.trim();
+  let score = 0;
+
+  if (isArticleLikeUrl(link.url)) score += 30;
+  if (text.length >= 8) score += 12;
+  if (text.length >= 24) score += 8;
+  if (/报名|截止|申请|招募|选拔|公示|通知|公告|评优|奖学金|推免|竞赛|比赛|讲座|说明会|训练营|项目|志愿|就业|实习|双选会|交流|交换/i.test(merged)) {
+    score += 42;
+  }
+  if (/学生|本科生|研究生|毕业生|团委|社团|体育|教务|学院|课程|考试|培养|创新|创业/i.test(merged)) {
+    score += 24;
+  }
+  if (/规则|细则|办法|管理|推荐|结果|名单|资格/i.test(merged)) {
+    score += 18;
+  }
+  if (link.publishedAt) {
+    const ageDays = Math.max(0, (Date.now() - new Date(link.publishedAt).getTime()) / 86400000);
+    if (ageDays <= 7) score += 35;
+    else if (ageDays <= 30) score += 20;
+    else if (ageDays <= 90) score += 8;
+  }
+  if (/更多|more|首页|english|北航官网|网上投稿|部门概况|机构介绍/i.test(text)) {
+    score -= 80;
+  }
+  if (/总结|回顾|喜报|荣获|揭牌|来校交流|主题班会|头版头条|成果|会议|调研/i.test(merged)) {
+    score -= 18;
+  }
+
+  return score;
+}
+
 function resolveReadTargets(source: SourceWatchRecord, fetchTarget: string, snapshot: PageSnapshot) {
-  const articleUrls = snapshot.linkedUrls.filter((url) => isArticleLikeUrl(url) && url !== fetchTarget);
-  const uniqueArticleUrls = Array.from(new Set(articleUrls));
+  const articleLinks = snapshot.links
+    .filter((link) => isArticleLikeUrl(link.url) && link.url !== fetchTarget)
+    .sort((a, b) => scoreSourceLink(b, source) - scoreSourceLink(a, source));
+  const uniqueArticleUrls = Array.from(new Set(articleLinks.map((link) => link.url)));
 
   if (isWeChatLikeSource(source)) {
     return uniqueArticleUrls.length > 0 ? uniqueArticleUrls.slice(0, 3) : [fetchTarget];
@@ -449,6 +552,23 @@ function resolveLinkedSignalHref(title: string, text: string) {
   return undefined;
 }
 
+function isGenericFallbackPage(source: SourceWatchRecord, title: string, readUrl: string) {
+  if (isArticleLikeUrl(readUrl)) {
+    return false;
+  }
+
+  const normalizedTitle = normalizeCandidateText(title);
+  const normalizedSource = normalizeCandidateText(source.source_name);
+  const normalizedOrganization = normalizeCandidateText(source.organization_or_college);
+
+  return (
+    !normalizedTitle ||
+    normalizedTitle === normalizedSource ||
+    normalizedTitle === normalizedOrganization ||
+    /首页|主页|新闻网|学生处|教务部|通知公告|新闻动态|学生专区|共青团北京航空航天大学委员会/.test(title)
+  );
+}
+
 function normalizeCandidateFromModel(
   candidate: DiscoveryExtractionCandidate,
   source: SourceWatchRecord,
@@ -485,7 +605,7 @@ function normalizeCandidateFromModel(
     confidence: candidate.confidence,
     screening_status: candidate.screening_status,
     reason_summary: candidate.reason_summary,
-    source_origin: "user_followed",
+    source_origin: source.source_origin,
     linked_signal_href: resolveLinkedSignalHref(candidate.title, mergedText),
     original_url: readUrl,
     read_url: readUrl,
@@ -504,6 +624,10 @@ function buildFallbackCandidates(
 ): DiscoveryCandidate[] {
   const excerpt = snapshot.text.slice(0, 180);
   const title = snapshot.title || source.source_name;
+  if (isGenericFallbackPage(source, title, readUrl)) {
+    return [];
+  }
+
   const candidateType = inferCandidateType(title, excerpt);
   const screeningStatus = inferScreeningStatus(title, excerpt);
 
@@ -522,13 +646,13 @@ function buildFallbackCandidates(
       candidate_type: candidateType,
       deadline: null,
       target_audience: "北航学生",
-      preliminary_tags: [candidateType, "用户关注来源"],
+      preliminary_tags: [candidateType, source.is_user_added ? "用户关注来源" : "系统默认来源"],
       extracted_value_signals: inferSignals(title, excerpt),
       confidence: 0.48,
       screening_status: screeningStatus,
       reason_summary:
         "这是一次保守提取结果，OpenUni 已先记录这个来源最近的公开内容，后续会继续观察它是否能稳定产出高价值候选。",
-      source_origin: "user_followed",
+      source_origin: source.source_origin,
       linked_signal_href: resolveLinkedSignalHref(title, excerpt),
       original_url: readUrl,
       read_url: readUrl,
@@ -624,6 +748,7 @@ async function syncSources(sources: SourceWatchRecord[]): Promise<DiscoverySyncR
             source,
             pageTitle: current.snapshot.title,
             pageText: current.snapshot.text,
+            timeoutMs: DISCOVERY_MODEL_TIMEOUT_MS,
           });
 
           candidates.push(

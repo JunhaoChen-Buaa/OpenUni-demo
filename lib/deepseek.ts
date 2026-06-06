@@ -576,16 +576,22 @@ export async function requestMiniMaxDiscoveryExtraction({
   source,
   pageTitle,
   pageText,
+  timeoutMs,
 }: {
   source: SourceWatchRecord;
   pageTitle: string | null;
   pageText: string;
+  timeoutMs?: number;
 }): Promise<DiscoveryExtractionResult> {
   const systemPrompt = [
     "你是 OpenUni 的北航发现层提取助手。",
     "你的任务不是做泛化摘要，而是从单个北航来源页面里提取可进入“北航最近发生了什么”发现层的结构化候选。",
+    "OpenUni 的目标是帮助学生提前发现低可见但重要的校园信号：强时效、可行动、规则相关、机会相关、与个人阶段有关的内容优先。",
     "页面可能是通知列表页、栏目页或文章详情页。",
-    "优先识别活动、讲座、比赛、招募、说明会、通知更新、规则更新和值得继续观察的校园动态。",
+    "优先识别活动、讲座、比赛、招募、说明会、通知更新、规则更新、报名/截止/公示/申请窗口和值得继续观察的校园动态。",
+    "不要把站点名、栏目名、MORE、首页导航、泛新闻页面标题当成候选。",
+    "对纯宣传报道、成果喜报、领导活动和回顾总结要保守处理，除非它们对学生有明确下一步行动或规则影响。",
+    "每条候选都要回答：发生了什么、可能影响谁、为什么值得继续看或为什么暂不优先。",
     "不要编造页面里没有出现的信息。",
     "如果信息不明确，就保留为空、null 或更保守的表述。",
     "只返回 JSON。",
@@ -626,9 +632,11 @@ export async function requestMiniMaxDiscoveryExtraction({
     "规则：",
     "1. 最多输出 4 条候选。",
     "2. 如果页面大多是噪音内容，也可以输出空数组。",
-    "3. promoted_to_signal 只用于明显高价值、强时效、可行动的内容。",
+    "3. promoted_to_signal 只用于明显高价值、强时效、可行动、且对学生有直接影响的内容。",
     "4. useful 用于值得继续观察但还没必要直接进入信号页的内容。",
-    "5. ignored 代表可保留为校园动态，但不重点推进。",
+    "5. new 用于真实校园动态，但暂时还缺少明确行动价值的内容。",
+    "6. ignored 代表可保留为背景动态，但不重点推进。",
+    "7. 标题必须是具体事件/通知/机会标题，不能是来源名称或栏目名称。",
   ].join("\n");
 
   const content = await requestMiniMaxChat({
@@ -640,6 +648,7 @@ export async function requestMiniMaxDiscoveryExtraction({
     temperature: 0.1,
     reasoningMode: "discovery_extraction",
     jsonMode: true,
+    timeoutMs,
   });
 
   return parseDiscoveryExtraction(content);

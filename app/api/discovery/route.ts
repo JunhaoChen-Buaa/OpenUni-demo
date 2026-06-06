@@ -549,7 +549,9 @@ async function ensureSystemSourcesSynced(
     };
   }
 
-  const builtInSources = getBuiltInSourcesForSync(SYSTEM_SOURCE_SYNC_LIMIT);
+  const builtInSources = getBuiltInSourcesForSync(SYSTEM_SOURCE_SYNC_LIMIT, {
+    preferSignalSources: IS_VERCEL,
+  });
   if (!builtInSources.length) {
     return {
       store,
