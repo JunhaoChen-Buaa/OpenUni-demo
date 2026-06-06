@@ -1,5 +1,6 @@
 import "server-only";
 
+import os from "os";
 import path from "path";
 import { promises as fs } from "fs";
 import {
@@ -12,7 +13,9 @@ import {
   type StoredCollegeRule,
 } from "@/lib/college-rule-types";
 
-const RULE_RUNTIME_DIR = path.join(process.cwd(), "data", "runtime", "college-rule");
+const RULE_RUNTIME_ROOT =
+  process.env.VERCEL === "1" ? path.join(os.tmpdir(), "openuni-runtime") : path.join(process.cwd(), "data", "runtime");
+const RULE_RUNTIME_DIR = path.join(RULE_RUNTIME_ROOT, "college-rule");
 const RULE_STORE_FILE = path.join(RULE_RUNTIME_DIR, "store.json");
 
 async function ensureRuleRuntime() {

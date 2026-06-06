@@ -22,7 +22,17 @@ import {
   type DiscoverySyncSourceReport,
 } from "@/lib/discovery-sync";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 100;
+
 const SYSTEM_SOURCE_SYNC_MAX_AGE_MS = 1000 * 60 * 90;
+const IS_VERCEL = process.env.VERCEL === "1";
+const SYSTEM_SOURCE_SYNC_LIMIT = IS_VERCEL ? 2 : 8;
+const CUSTOM_SOURCE_SYNC_LIMIT = IS_VERCEL ? 2 : 50;
+
+type RuntimeSource = Awaited<ReturnType<typeof getDiscoveryRuntimeState>>["custom_sources"][number];
+type RuntimeCandidate = Awaited<ReturnType<typeof getDiscoveryRuntimeState>>["generated_candidates"][number];
 
 type DiscoveryResultSummary = {
   title: string;
@@ -114,7 +124,7 @@ function buildRuntime(store: Awaited<ReturnType<typeof getDiscoveryRuntimeState>
   return {
     has_custom_sources: store.custom_sources.length > 0,
     custom_source_count: store.custom_sources.length,
-    last_synced_at: store.last_synced_at,
+    last_synced_at: store.last_synced_at ?? store.last_system_synced_at ?? null,
     last_system_synced_at: store.last_system_synced_at ?? null,
   };
 }
@@ -170,7 +180,7 @@ function buildPayload(
   },
 ) {
   const data = buildDiscoveryPageData({
-    lastSyncedAtOverride: store.last_synced_at ?? undefined,
+    lastSyncedAtOverride: store.last_synced_at ?? store.last_system_synced_at ?? undefined,
     runtimeSources: [...(store.system_sources ?? []), ...store.custom_sources],
     runtimeCandidates: [...(store.system_generated_candidates ?? []), ...store.generated_candidates],
   });
@@ -498,6 +508,30 @@ function shouldRefreshSystemSources(lastSystemSyncedAt: string | null | undefine
   return Date.now() - timestamp > SYSTEM_SOURCE_SYNC_MAX_AGE_MS;
 }
 
+function getCustomSourcesForSync(sources: RuntimeSource[]) {
+  const activeSources = sources.filter((source) => source.status === "active");
+  const prioritizedSources = activeSources.length > 0 ? activeSources : sources;
+
+  return IS_VERCEL ? prioritizedSources.slice(0, CUSTOM_SOURCE_SYNC_LIMIT) : prioritizedSources;
+}
+
+function mergeUpdatedSources(existingSources: RuntimeSource[], updatedSources: RuntimeSource[]) {
+  const updatesById = new Map(updatedSources.map((source) => [source.id, source]));
+
+  return existingSources.map((source) => updatesById.get(source.id) ?? source);
+}
+
+function mergeUpdatedCandidates(
+  existingCandidates: RuntimeCandidate[],
+  updatedCandidates: RuntimeCandidate[],
+  syncedSourceIds: Set<string>,
+) {
+  return [
+    ...existingCandidates.filter((candidate) => !syncedSourceIds.has(candidate.source_id)),
+    ...updatedCandidates,
+  ];
+}
+
 async function ensureSystemSourcesSynced(
   store: Awaited<ReturnType<typeof getDiscoveryRuntimeState>>,
   force = false,
@@ -515,7 +549,7 @@ async function ensureSystemSourcesSynced(
     };
   }
 
-  const builtInSources = getBuiltInSourcesForSync();
+  const builtInSources = getBuiltInSourcesForSync(SYSTEM_SOURCE_SYNC_LIMIT);
   if (!builtInSources.length) {
     return {
       store,
@@ -852,32 +886,56 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "sync") {
-    const store = await getDiscoveryRuntimeState();
-    const systemSync = await ensureSystemSourcesSynced(store, true);
-    const customSync = systemSync.store.custom_sources.length
-      ? await syncFollowedSources(systemSync.store.custom_sources)
-      : null;
-    const nextStore = customSync
-      ? await saveDiscoverySyncResult({
-          custom_sources: customSync.updated_sources,
-          generated_candidates: customSync.generated_candidates,
-          last_synced_at: customSync.synced_at,
-        })
-      : systemSync.store;
+    try {
+      const store = await getDiscoveryRuntimeState();
+      const systemSync = await ensureSystemSourcesSynced(store, true);
+      const customSourcesForSync = getCustomSourcesForSync(systemSync.store.custom_sources);
+      const customSync = customSourcesForSync.length
+        ? await syncFollowedSources(customSourcesForSync)
+        : null;
+      const syncedCustomSourceIds = new Set(
+        customSync?.updated_sources.map((source) => source.id) ?? [],
+      );
+      const nextStore = customSync
+        ? await saveDiscoverySyncResult({
+            custom_sources: mergeUpdatedSources(
+              systemSync.store.custom_sources,
+              customSync.updated_sources,
+            ),
+            generated_candidates: mergeUpdatedCandidates(
+              systemSync.store.generated_candidates,
+              customSync.generated_candidates,
+              syncedCustomSourceIds,
+            ),
+            last_synced_at: customSync.synced_at,
+          })
+        : systemSync.store;
 
-    const syncReport = mergeSyncReports([systemSync.syncResult, customSync]);
-    const payload = buildPayload(nextStore, {
-      notice:
-        syncReport.failed_source_count > 0
-          ? "本轮发现同步已完成。部分来源读取失败，但其余官方源和关注来源结果已经更新。"
-          : "本轮发现同步完成，系统来源和关注来源都已刷新。",
-    });
+      const syncReport = mergeSyncReports([systemSync.syncResult, customSync]);
+      const payload = buildPayload(nextStore, {
+        notice:
+          syncReport.failed_source_count > 0
+            ? "本轮发现同步已完成。部分来源读取失败，但其余官方源和关注来源结果已经更新。"
+            : "本轮发现同步完成，系统来源和关注来源都已刷新。",
+      });
 
-    return NextResponse.json({
-      ...payload,
-      result_summary: buildSyncResultSummary(payload.data, syncReport),
-      sync_report: syncReport,
-    });
+      return NextResponse.json({
+        ...payload,
+        result_summary: buildSyncResultSummary(payload.data, syncReport),
+        sync_report: syncReport,
+      });
+    } catch (error) {
+      console.error("[discovery] sync failed", error);
+      const store = await getDiscoveryRuntimeState();
+
+      return NextResponse.json(
+        buildPayload(store, {
+          error: "线上同步这次被运行环境中断了，当前先保留上一轮发现结果。",
+          notice: "OpenUni 已保留当前发现层；完整多来源同步后续应拆成后台任务。",
+        }),
+        { status: 200 },
+      );
+    }
   }
 
   if (action === "remove_source") {

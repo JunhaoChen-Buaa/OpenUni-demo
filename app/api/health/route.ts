@@ -16,6 +16,12 @@ export async function GET() {
       ),
       model_provider: "minimax",
       model: process.env.MINIMAX_MODEL?.trim() || "MiniMax-M3",
+      deployment_provider: process.env.VERCEL === "1" ? "vercel" : "local",
+      runtime_cache: process.env.VERCEL === "1" ? "tmp" : "local_data_runtime",
+      discovery_sync_mode:
+        process.env.VERCEL === "1" && process.env.OPENUNI_DISCOVERY_MODEL_SYNC !== "true"
+          ? "vercel_lightweight"
+          : "model_assisted",
     },
     { status: 200 },
   );

@@ -1,5 +1,6 @@
 ﻿import "server-only";
 
+import os from "os";
 import path from "path";
 import { promises as fs } from "fs";
 import type {
@@ -16,7 +17,9 @@ import type {
   SourceWatchStatus,
 } from "@/data/buaa-discovery-kb";
 
-const DISCOVERY_RUNTIME_DIR = path.join(process.cwd(), "data", "runtime", "discovery");
+const DISCOVERY_RUNTIME_ROOT =
+  process.env.VERCEL === "1" ? path.join(os.tmpdir(), "openuni-runtime") : path.join(process.cwd(), "data", "runtime");
+const DISCOVERY_RUNTIME_DIR = path.join(DISCOVERY_RUNTIME_ROOT, "discovery");
 const DISCOVERY_STORE_FILE = path.join(DISCOVERY_RUNTIME_DIR, "store.json");
 const DEFAULT_SCHOOL = "北京航空航天大学";
 

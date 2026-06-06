@@ -12,6 +12,9 @@ import {
 } from "@/lib/deepseek";
 
 const FETCH_TIMEOUT_MS = 9000;
+const IS_VERCEL = process.env.VERCEL === "1";
+const MAX_READ_TARGETS_PER_SOURCE = IS_VERCEL ? 1 : 3;
+const USE_MODEL_DISCOVERY_SYNC = !IS_VERCEL || process.env.OPENUNI_DISCOVERY_MODEL_SYNC === "true";
 
 export type DiscoverySyncResult = {
   synced_at: string;
@@ -586,7 +589,10 @@ async function syncSources(sources: SourceWatchRecord[]): Promise<DiscoverySyncR
 
     try {
       const entrySnapshot = await fetchPageSnapshot(fetchTarget);
-      const readTargets = resolveReadTargets(source, fetchTarget, entrySnapshot);
+      const readTargets = resolveReadTargets(source, fetchTarget, entrySnapshot).slice(
+        0,
+        MAX_READ_TARGETS_PER_SOURCE,
+      );
       const snapshots: Array<{ url: string; snapshot: PageSnapshot }> = [];
       for (const target of readTargets) {
         try {
@@ -606,6 +612,13 @@ async function syncSources(sources: SourceWatchRecord[]): Promise<DiscoverySyncR
       let candidates: DiscoveryCandidate[] = [];
 
       for (const [index, current] of snapshots.entries()) {
+        if (!USE_MODEL_DISCOVERY_SYNC) {
+          candidates.push(
+            ...buildFallbackCandidates(source, current.snapshot, syncedAt, current.url, syncRunId),
+          );
+          continue;
+        }
+
         try {
           const extraction = await requestMiniMaxDiscoveryExtraction({
             source,

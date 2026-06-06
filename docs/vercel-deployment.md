@@ -9,8 +9,11 @@ Set these in Vercel project environment variables for Production, Preview, and D
 - `MINIMAX_API_KEY`
 - `MINIMAX_BASE_URL=https://api.minimax.io/v1`
 - `MINIMAX_MODEL=MiniMax-M3`
+- Optional: `OPENUNI_DISCOVERY_MODEL_SYNC=true` enables model-assisted multi-source discovery extraction on Vercel.
 
 The app can still boot without these variables, but model-backed answers, source parsing, and PDF rule extraction will fall back to local demo behavior where available.
+
+On Vercel, discovery sync defaults to a lightweight mode so the "更新发现" button can finish inside one serverless request. It still reads live source pages, but it avoids running a long MiniMax extraction chain across many sources unless `OPENUNI_DISCOVERY_MODEL_SYNC=true` is explicitly set. Runtime discovery/rule cache writes use Vercel's temporary storage, so they are suitable for demo debugging but not long-term persistence.
 
 ## Vercel settings
 
